@@ -1,4 +1,4 @@
-from urllib.parse import quote
+from urllib.parse import ParseResult, quote, urlunparse
 
 import bs4
 import dateparser
@@ -7,25 +7,51 @@ from django.http import JsonResponse
 from django.views import View
 
 
-class TorrentMixin:
+class RutrackerView(View):
+    """
+
+    View for Rutracker.org website.
+
+    Before starting, you should login to website. For login you should send
+    POST request to this endpoint with username and password.
+
+    After successful login, you can make GET request to this endpoint with:
+        * sections (1, 184, 6498, etc.)
+        * (required) includes (Python, Javascript, GTA, etc.)
+        * excludes (2005, EPUB, CAMRip, etc.)
+        * filters (2017, PDF, etc.)
+
+    PS. All GET params should be separated by ','.
+
+    """
+
+    _BASE = {
+        'scheme': 'https',
+        'netloc': 'rutracker.org/forum',
+        'path': '',
+        'params': '',
+        'query': '',
+        'fragment': '',
+    }
     _session = requests.session()
-    _BASE_URL = None
-
-
-class RutrackerView(TorrentMixin, View):
-    _BASE_URL = 'https://rutracker.org/forum/'
 
     def _login(self, request):
         assert request.session.get("payload"), "You should authorize"
+
         response = self._session.post(
-            self._BASE_URL + 'login.php?redirect=tracker.php',
+            self._get_url(path='login.php', query='redirect=tracker.php'),
             data=request.session['payload']
         )
         soup = bs4.BeautifulSoup(response.text, 'html.parser')
+
         if len(soup.select('input[name="login_username"]')) == 2:
             del request.session['payload']
             raise AssertionError("Incorrect credenitials")
+
         return soup
+
+    def _get_url(self, *args, **kwargs):
+        return urlunparse(ParseResult(**dict(self._BASE, **kwargs)))
 
     def post(self, request, *args, **kwargs):
         username = request.POST.get('username')
@@ -37,6 +63,7 @@ class RutrackerView(TorrentMixin, View):
         }
 
         request.session['payload'] = payload
+
         try:
             soup = self._login(request)
         except AssertionError as e:
@@ -48,6 +75,7 @@ class RutrackerView(TorrentMixin, View):
             (int(option.get('value')), option.string.strip().strip('|- '))
             for option in soup.find(id='fs-main').findAll('option')
         ]
+
         return JsonResponse(sections, safe=False)
 
     def get(self, request, *args, **kwargs):
@@ -75,27 +103,33 @@ class RutrackerView(TorrentMixin, View):
                 'error': e.args[0]
             })
 
+        if not includes:
+            return JsonResponse({
+                'error': 'Empty search query'
+            })
+
         result = []
         if not sections:
             for include in includes:
-                url = self._BASE_URL + 'tracker.php'
                 if filters and excludes:
-                    url += '?nm={}'.format(quote(
+                    query = 'nm={}'.format(quote(
                         " -".join([
                             " & ".join([include] + filters),
                             " -".join(excludes)
                         ])
                     ))
                 elif filters:
-                    url += '?nm={}'.format(quote(
+                    query = 'nm={}'.format(quote(
                         " & ".join([include] + filters)
                     ))
                 elif excludes:
-                    url += '?nm={}'.format(quote(
+                    query = 'nm={}'.format(quote(
                         " -".join([include, " -".join(excludes)])
                     ))
                 else:
-                    url += '?nm={}'.format(include)
+                    query = 'nm={}'.format(include)
+
+                url = self._get_url(path='tracker.php', query=query)
 
                 response = self._session.get(url)
 
@@ -104,10 +138,9 @@ class RutrackerView(TorrentMixin, View):
                     '#tor-tbl > tbody > tr > td.row4.med.tLeft.t-title'
                     ' > div.wbr.t-title > a'
                 )
-                print(url)
                 result += [
                     (
-                        self._BASE_URL + a.get('href'),
+                        self._get_url(path=a.get('href')),
                         a.string.strip(),
                         dateparser.parse(
                             a.find_parent('tr').find('p').string
@@ -118,25 +151,29 @@ class RutrackerView(TorrentMixin, View):
         else:
             for section in sections:
                 for include in includes:
-                    url = self._BASE_URL + 'tracker.php?f={}'.format(section)
+                    query = ['f={}'.format(section)]
                     if filters and excludes:
-                        url += '&nm={}'.format(quote(
+                        query.append('nm={}'.format(quote(
                             " -".join([
                                 " & ".join([include] + filters),
                                 " -".join(excludes)
                             ])
-                        ))
+                        )))
                     elif filters:
-                        url += '&nm={}'.format(quote(
+                        query.append('nm={}'.format(quote(
                             " & ".join([include] + filters)
-                        ))
+                        )))
                     elif excludes:
-                        url += '&nm={}'.format(quote(
+                        query.append('nm={}'.format(quote(
                             " -".join([include, " -".join(excludes)])
-                        ))
+                        )))
                     else:
-                        url += '&nm={}'.format(include)
+                        query.append('nm={}'.format(include))
 
+                    url = self._get_url(
+                        path='tracker.php',
+                        query="&".join(query)
+                    )
                     response = self._session.get(url)
 
                     soup = bs4.BeautifulSoup(response.text, 'html.parser')
@@ -146,7 +183,7 @@ class RutrackerView(TorrentMixin, View):
                     )
                     result += [
                         (
-                            self._BASE_URL + a.get('href'),
+                            self._get_url(path=a.get('href')),
                             a.string.strip(),
                             dateparser.parse(
                                 a.find_parent('tr').find('p').string
